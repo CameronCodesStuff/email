@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DISPATCH — email relay console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#0a0c10;
+    --panel:#10151b;
+    --panel-2:#151b23;
+    --line:#222b36;
+    --line-soft:#1a212a;
+    --txt:#e7eef6;
+    --muted:#76828f;
+    --muted-dim:#4c5662;
+    --amber:#f4a52c;
+    --amber-dim:#5a4420;
+    --cyan:#56c5e8;
+    --green:#3fb950;
+    --red:#f3564a;
+    --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+    --disp:"Space Grotesk",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(244,165,44,.05), transparent 60%),
+      var(--bg);
+    color:var(--txt);
+    font-family:var(--disp);
+    -webkit-font-smoothing:antialiased;
+    line-height:1.45;
+  }
+  a{color:var(--cyan)}
+
+  /* ---- top status bar ---- */
+  .bar{
+    display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+    padding:12px 20px;
+    border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,var(--panel-2),var(--panel));
+    position:sticky;top:0;z-index:10;
+  }
+  .brand{font-weight:700;letter-spacing:.22em;font-size:15px}
+  .brand b{color:var(--amber)}
+  .bar .tag{
+    font-family:var(--mono);font-size:11px;color:var(--muted);
+    border:1px solid var(--line);border-radius:3px;padding:2px 7px;letter-spacing:.05em;
+  }
+  .conn{display:flex;align-items:center;gap:8px;margin-left:auto;font-family:var(--mono);font-size:12px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--muted-dim);box-shadow:0 0 0 0 rgba(0,0,0,0)}
+  .dot.live{background:var(--green);animation:pulse 1.8s infinite}
+  .dot.down{background:var(--red)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(63,185,80,.5)}70%{box-shadow:0 0 0 7px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
+
+  /* ---- layout ---- */
+  .wrap{max-width:1280px;margin:0 auto;padding:22px 20px 60px;display:grid;grid-template-columns:1.05fr .95fr;gap:22px}
+  @media (max-width:940px){.wrap{grid-template-columns:1fr}}
+
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .panel > header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:11px 16px;border-bottom:1px solid var(--line);background:var(--panel-2);
+  }
+  .panel > header h2{margin:0;font-size:12px;letter-spacing:.18em;font-weight:600;color:var(--muted);text-transform:uppercase}
+  .panel .body{padding:18px 16px}
+
+  /* endpoint strip */
+  .endpoint{display:flex;gap:8px;align-items:center}
+  .endpoint input{flex:1}
+
+  label.fld{display:block;margin:0 0 14px}
+  .fld > span{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--muted);margin-bottom:6px;text-transform:uppercase}
+  input,textarea,select{
+    width:100%;background:var(--bg);color:var(--txt);
+    border:1px solid var(--line);border-radius:5px;
+    padding:10px 11px;font-family:var(--mono);font-size:13px;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);box-shadow:0 0 0 3px rgba(244,165,44,.12)}
+  textarea{resize:vertical;min-height:64px;line-height:1.5}
+  .hint{font-family:var(--mono);font-size:11px;color:var(--muted-dim);margin-top:5px}
+
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media (max-width:520px){.row{grid-template-columns:1fr}}
+
+  .check{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:14px;cursor:pointer}
+  .check input{width:auto}
+
+  /* schedule segmented control */
+  .seg{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px}
+  .seg button{
+    background:var(--bg);border:1px solid var(--line);color:var(--muted);
+    font-family:var(--mono);font-size:11px;letter-spacing:.05em;padding:9px 4px;border-radius:5px;cursor:pointer;
+    text-transform:uppercase;transition:all .15s;
+  }
+  .seg button:hover{color:var(--txt);border-color:var(--muted-dim)}
+  .seg button.on{background:var(--amber-dim);border-color:var(--amber);color:var(--amber)}
+  .sched-cfg{margin-bottom:16px}
+  .sched-cfg .interval{display:grid;grid-template-columns:1fr 1.2fr;gap:10px}
+
+  .actions{display:flex;gap:10px;margin-top:4px}
+  button.go{
+    flex:1;font-family:var(--disp);font-weight:700;letter-spacing:.04em;font-size:13px;
+    padding:12px;border-radius:6px;cursor:pointer;border:1px solid transparent;transition:transform .05s, filter .15s;
+  }
+  button.go:active{transform:translateY(1px)}
+  .go.primary{background:var(--amber);color:#1a1205;border-color:var(--amber)}
+  .go.primary:hover{filter:brightness(1.08)}
+  .go.ghost{background:transparent;border-color:var(--line);color:var(--txt)}
+  .go.ghost:hover{border-color:var(--cyan);color:var(--cyan)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+
+  /* right column */
+  .console{height:300px;overflow-y:auto;font-family:var(--mono);font-size:12px;background:#070a0d;padding:12px 14px;margin:0}
+  .console .ln{display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--line-soft);white-space:pre-wrap;word-break:break-word}
+  .console .ts{color:var(--muted-dim);flex:0 0 auto}
+  .console .lv{flex:0 0 52px;font-weight:600}
+  .lv-sent{color:var(--green)} .lv-error{color:var(--red)} .lv-warn{color:var(--amber)} .lv-info{color:var(--cyan)}
+  .console .msg{color:var(--txt);opacity:.92}
+  .console .empty{color:var(--muted-dim)}
+
+  .racks{display:flex;flex-direction:column;gap:10px;padding:14px 16px}
+  .job{border:1px solid var(--line);border-radius:6px;padding:12px 13px;background:var(--panel-2)}
+  .job .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .job .name{font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pill{font-family:var(--mono);font-size:10px;letter-spacing:.06em;padding:2px 7px;border-radius:3px;text-transform:uppercase;border:1px solid}
+  .pill.active{color:var(--green);border-color:var(--green)}
+  .pill.completed{color:var(--muted);border-color:var(--muted-dim)}
+  .pill.error{color:var(--red);border-color:var(--red)}
+  .job .meta{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:9px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .job .meta b{color:var(--txt);font-weight:500}
+  .job .x{margin-top:10px;width:100%;background:transparent;border:1px solid var(--line);color:var(--muted);font-family:var(--mono);font-size:11px;padding:6px;border-radius:4px;cursor:pointer;letter-spacing:.06em}
+  .job .x:hover{border-color:var(--red);color:var(--red)}
+  .racks .empty{color:var(--muted-dim);font-family:var(--mono);font-size:12px;text-align:center;padding:24px 0}
+
+  /* toast */
+  #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);
+    background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--cyan);
+    padding:11px 16px;border-radius:6px;font-family:var(--mono);font-size:12px;max-width:90vw;
+    opacity:0;transition:all .25s;pointer-events:none;z-index:50}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.ok{border-left-color:var(--green)}
+  #toast.err{border-left-color:var(--red)}
+
+  .note{font-family:var(--mono);font-size:11px;color:var(--muted-dim);line-height:1.6;padding:14px 16px;border-top:1px solid var(--line)}
+  .note b{color:var(--amber)}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div class="brand"><b>DISPATCH</b> / EMAIL RELAY</div>
+  <span class="tag" id="jobCount">0 active</span>
+  <div class="conn">
+    <span class="dot" id="dot"></span>
+    <span id="connText">no relay</span>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- LEFT: compose + config -->
+  <section class="panel">
+    <header><h2>Compose &amp; schedule</h2></header>
+    <div class="body">
+
+      <label class="fld">
+        <span>Relay endpoint (your Render URL)</span>
+        <div class="endpoint">
+          <input id="endpoint" placeholder="https://your-service.onrender.com" />
+          <button class="go ghost" style="flex:0 0 auto;padding:10px 14px" id="connectBtn">Connect</button>
+        </div>
+        <div class="hint">Saved on this device. The first request after idle can take ~60s while Render wakes.</div>
+      </label>
+
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:4px 0 18px" />
+
+      <label class="fld">
+        <span>Recipients</span>
+        <textarea id="recipients" placeholder="alice@example.com, bob@example.com&#10;newline or comma separated"></textarea>
+      </label>
+
+      <div class="row">
+        <label class="fld">
+          <span>Sender (Gmail)</span>
+          <input id="sender" placeholder="you@gmail.com" autocomplete="username" />
+        </label>
+        <label class="fld">
+          <span>App password</span>
+          <input id="apppass" type="password" placeholder="16-char app password" autocomplete="off" />
+        </label>
+      </div>
+      <label class="check"><input type="checkbox" id="rememberPass" /> Remember app password on this device</label>
+
+      <label class="fld">
+        <span>Subject</span>
+        <input id="subject" placeholder="Subject line" />
+      </label>
+
+      <label class="fld">
+        <span>Message</span>
+        <textarea id="bodytext" style="min-height:110px" placeholder="Your message…"></textarea>
+      </label>
+      <label class="check"><input type="checkbox" id="ishtml" /> Body is HTML</label>
+
+      <!-- schedule -->
+      <label class="fld" style="margin-bottom:8px"><span>When to send</span></label>
+      <div class="seg" id="seg">
+        <button data-t="once" class="on">Once</button>
+        <button data-t="interval">Every</button>
+        <button data-t="daily">Daily</button>
+        <button data-t="cron">Cron</button>
+      </div>
+
+      <div class="sched-cfg" id="cfg"></div>
+
+      <div class="actions">
+        <button class="go ghost" id="testBtn">Send test now</button>
+        <button class="go primary" id="schedBtn">Schedule dispatch</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- RIGHT: monitor -->
+  <section style="display:flex;flex-direction:column;gap:22px">
+    <div class="panel">
+      <header>
+        <h2>Active schedules</h2>
+        <span class="tag" id="rackCount">—</span>
+      </header>
+      <div class="racks" id="racks"><div class="empty">No schedules armed.</div></div>
+    </div>
+
+    <div class="panel">
+      <header>
+        <h2>Dispatch log</h2>
+        <span class="tag">live · 4s</span>
+      </header>
+      <pre class="console" id="console"><span class="empty">// waiting for relay connection…</span></pre>
+      <div class="note">
+        <b>Heads up:</b> schedules live in the relay's memory. On Render's free tier the service sleeps after 15 min idle and forgets everything on restart. Keep it warm with an uptime pinger hitting <code>/health</code>, or run it on a paid instance for anything you actually depend on.
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function(){
+  "use strict";
+  const $ = s => document.querySelector(s);
+  const LS = window.localStorage;
+
+  // ---- state ----
+  let endpoint = (LS.getItem("dispatch.endpoint") || "").replace(/\/+$/,"");
+  let connected = false;
+  let schedType = "once";
+
+  // restore saved fields
+  $("#endpoint").value = endpoint;
+  $("#sender").value = LS.getItem("dispatch.sender") || "";
+  if (LS.getItem("dispatch.pass")) { $("#apppass").value = LS.getItem("dispatch.pass"); $("#rememberPass").checked = true; }
+
+  // ---- toast ----
+  let toastT;
+  function toast(msg, kind){
+    const el = $("#toast");
+    el.textContent = msg;
+    el.className = "show " + (kind||"");
+    clearTimeout(toastT);
+    toastT = setTimeout(()=>{ el.className = el.className.replace("show","").trim(); }, 4200);
+  }
+
+  // ---- fetch helper ----
+  async function api(path, opts){
+    if (!endpoint) throw new Error("Set the relay endpoint first.");
+    const res = await fetch(endpoint + path, Object.assign({
+      headers:{ "Content-Type":"application/json" }
+    }, opts||{}));
+    let data = {};
+    try { data = await res.json(); } catch(_){}
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+
+  // ---- connection ----
+  function setConn(state){
+    const dot = $("#dot"), txt = $("#connText");
+    dot.className = "dot " + (state==="live"?"live":state==="down"?"down":"");
+    txt.textContent = state==="live" ? "relay online" : state==="down" ? "relay unreachable" : "no relay";
+    connected = state==="live";
+  }
+
+  async function connect(){
+    endpoint = $("#endpoint").value.trim().replace(/\/+$/,"");
+    LS.setItem("dispatch.endpoint", endpoint);
+    if (!endpoint){ setConn("idle"); return; }
+    setConn("idle"); $("#connText").textContent = "waking relay…";
+    try {
+      await api("/health");
+      setConn("live");
+      toast("Relay online.", "ok");
+      refresh();
+    } catch(e){
+      setConn("down");
+      toast("Can't reach relay: " + e.message, "err");
+    }
+  }
+  $("#connectBtn").addEventListener("click", connect);
+
+  // ---- schedule config UI ----
+  function renderCfg(){
+    const c = $("#cfg");
+    if (schedType==="once"){
+      const def = new Date(Date.now()+3600000).toISOString().slice(0,16);
+      c.innerHTML = `<label class="fld"><span>Send at</span><input type="datetime-local" id="onceAt" value="${def}"></label>`;
+    } else if (schedType==="interval"){
+      c.innerHTML = `<div class="interval">
+        <label class="fld"><span>Every</span><input type="number" id="intN" min="1" value="30"></label>
+        <label class="fld"><span>Unit</span><select id="intU">
+          <option value="60000">minutes</option>
+          <option value="3600000">hours</option>
+          <option value="86400000">days</option>
+        </select></label>
+      </div><div class="hint">Repeats forever until cancelled. Counts from when you schedule it.</div>`;
+    } else if (schedType==="daily"){
+      c.innerHTML = `<label class="fld"><span>Time each day (relay's clock — UTC on Render)</span><input type="time" id="dailyT" value="09:00"></label>`;
+    } else {
+      c.innerHTML = `<label class="fld"><span>Cron expression (UTC)</span><input id="cronE" placeholder="0 9 * * 1-5"></label>
+        <div class="hint">min hour day month weekday · e.g. <code>0 9 * * 1-5</code> = 9:00 weekdays.</div>`;
+    }
+  }
+  $("#seg").addEventListener("click", e=>{
+    const b = e.target.closest("button"); if(!b) return;
+    schedType = b.dataset.t;
+    [...$("#seg").children].forEach(x=>x.classList.toggle("on", x===b));
+    renderCfg();
+  });
+  renderCfg();
+
+  // ---- build schedule payload ----
+  function buildSchedule(){
+    if (schedType==="once"){
+      const v = $("#onceAt").value;
+      if(!v) throw new Error("Pick a send time.");
+      return { type:"once", config:{ at:new Date(v).toISOString() } };
+    }
+    if (schedType==="interval"){
+      const n = parseInt($("#intN").value,10);
+      const u = parseInt($("#intU").value,10);
+      if(!n || n<1) throw new Error("Interval must be at least 1.");
+      const ms = n*u;
+      const unit = u===60000?"minute":u===3600000?"hour":"day";
+      return { type:"interval", config:{ everyMs:ms, human:`every ${n} ${unit}${n>1?"s":""}` } };
+    }
+    if (schedType==="daily"){
+      const t = $("#dailyT").value; if(!t) throw new Error("Pick a daily time.");
+      return { type:"daily", config:{ time:t } };
+    }
+    const expr = $("#cronE").value.trim();
+    if(!expr) throw new Error("Enter a cron expression.");
+    return { type:"cron", config:{ expr } };
+  }
+
+  // ---- gather compose payload ----
+  function payload(){
+    const sender = $("#sender").value.trim();
+    const pass = $("#apppass").value;
+    LS.setItem("dispatch.sender", sender);
+    if ($("#rememberPass").checked) LS.setItem("dispatch.pass", pass); else LS.removeItem("dispatch.pass");
+    return {
+      user: sender,
+      pass,
+      recipients: $("#recipients").value,
+      subject: $("#subject").value,
+      body: $("#bodytext").value,
+      html: $("#ishtml").checked,
+      label: $("#subject").value
+    };
+  }
+
+  // ---- actions ----
+  async function busy(btn, fn){
+    const t = btn.textContent; btn.disabled = true; btn.textContent = "working…";
+    try { await fn(); } finally { btn.disabled=false; btn.textContent=t; }
+  }
+
+  $("#testBtn").addEventListener("click", ()=> busy($("#testBtn"), async ()=>{
+    try {
+      const r = await api("/test", { method:"POST", body: JSON.stringify(payload()) });
+      toast("Test sent ✓ ("+(r.messageId||"ok")+")", "ok");
+      refresh();
+    } catch(e){ toast(e.message, "err"); }
+  }));
+
+  $("#schedBtn").addEventListener("click", ()=> busy($("#schedBtn"), async ()=>{
+    try {
+      const body = payload();
+      body.schedule = buildSchedule();
+      await api("/schedules", { method:"POST", body: JSON.stringify(body) });
+      toast("Dispatch scheduled ✓", "ok");
+      refresh();
+    } catch(e){ toast(e.message, "err"); }
+  }));
+
+  // ---- rendering monitor ----
+  function fmtTime(iso){ if(!iso) return "—"; const d=new Date(iso); return d.toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}); }
+
+  function renderJobs(jobs){
+    $("#jobCount").textContent = jobs.length + " active";
+    $("#rackCount").textContent = jobs.length;
+    const r = $("#racks");
+    if (!jobs.length){ r.innerHTML = `<div class="empty">No schedules armed.</div>`; return; }
+    r.innerHTML = jobs.map(j=>{
+      const when = j.type==="interval" ? (j.config.human||"interval")
+        : j.type==="daily" ? `daily @ ${j.config.time} UTC`
+        : j.type==="cron" ? `cron ${j.config.expr}`
+        : `once @ ${fmtTime(j.config.at)}`;
+      return `<div class="job">
+        <div class="top">
+          <span class="name">${esc(j.label||"Untitled")}</span>
+          <span class="pill ${j.status}">${j.status}</span>
+        </div>
+        <div class="meta">
+          <span>${esc(when)}</span>
+          <span>to <b>${j.recipients.length}</b></span>
+          <span>sent <b>${j.runCount}</b></span>
+          ${j.errorCount?`<span style="color:var(--red)">errors ${j.errorCount}</span>`:""}
+          <span>next <b>${fmtTime(j.nextRun)}</b></span>
+        </div>
+        <button class="x" data-id="${j.id}">Cancel</button>
+      </div>`;
+    }).join("");
+    r.querySelectorAll(".x").forEach(b=> b.addEventListener("click", async ()=>{
+      try { await api("/schedules/"+b.dataset.id, { method:"DELETE" }); toast("Schedule cancelled.","ok"); refresh(); }
+      catch(e){ toast(e.message,"err"); }
+    }));
+  }
+
+  function renderLogs(logs){
+    const c = $("#console");
+    if (!logs.length){ c.innerHTML = `<span class="empty">// no activity yet</span>`; return; }
+    c.innerHTML = logs.map(l=>{
+      const t = new Date(l.ts).toLocaleTimeString();
+      return `<div class="ln"><span class="ts">${t}</span><span class="lv lv-${l.level}">${l.level.toUpperCase()}</span><span class="msg">${esc(l.message)}</span></div>`;
+    }).join("");
+    c.scrollTop = c.scrollHeight;
+  }
+
+  function esc(s){ return String(s).replace(/[&<>"]/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m])); }
+
+  async function refresh(){
+    if (!endpoint) return;
+    try {
+      const [s,l] = await Promise.all([api("/schedules"), api("/logs")]);
+      setConn("live");
+      renderJobs(s.jobs||[]);
+      renderLogs(l.logs||[]);
+    } catch(e){
+      if (connected) setConn("down");
+    }
+  }
+
+  // ---- boot ----
+  if (endpoint) connect();
+  setInterval(()=>{ if(endpoint) refresh(); }, 4000);
+})();
+</script>
+</body>
+</html>
