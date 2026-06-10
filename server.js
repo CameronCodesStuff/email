@@ -1,18 +1,20 @@
 /**
- * Email Dispatch — backend relay
+ * Email Dispatch — backend relay (Resend edition)
  * Runs as a Render Web Service. Receives send/schedule requests from the
- * GitHub Pages frontend and dispatches mail over Gmail SMTP via nodemailer.
+ * GitHub Pages frontend and dispatches mail via the Resend HTTP API (port 443,
+ * so it works on hosts like Render that block outbound SMTP).
  *
- * IMPORTANT NOTES
- * - Schedules + credentials live in memory only. They are wiped whenever the
- *   service restarts, redeploys, or spins down (Render free tier sleeps after
- *   15 min idle). For durable schedules you need a paid instance + a database.
- * - Credentials are never written to logs or returned in list responses.
+ * NOTES
+ * - Schedules + API key live in memory only. Wiped on restart/redeploy/spin-down
+ *   (Render free tier sleeps after 15 min idle). Durable schedules need a paid
+ *   instance + a database.
+ * - The API key is never written to logs or returned in list responses.
+ * - Resend free tier: 100 emails/day, 3000/month. Until you verify a domain you
+ *   can only send FROM onboarding@resend.dev TO your own Resend account email.
  */
 
 const express = require("express");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
 const cron = require("node-cron");
 const crypto = require("crypto");
 
@@ -20,86 +22,59 @@ const app = express();
 app.use(express.json({ limit: "256kb" }));
 
 // --- CORS -------------------------------------------------------------------
-// Open by default so it works from any GitHub Pages origin out of the box.
-// Lock this down by setting ALLOWED_ORIGIN to your Pages URL in Render env vars
-// e.g. ALLOWED_ORIGIN=https://camerocodesstuff.github.io
+// Set ALLOWED_ORIGIN to your Pages URL to lock the relay down, e.g.
+// ALLOWED_ORIGIN=https://cameroncodesstuff.github.io
 const allowed = process.env.ALLOWED_ORIGIN;
-app.use(
-  cors(
-    allowed
-      ? { origin: allowed.split(",").map((s) => s.trim()) }
-      : {} // reflect any origin
-  )
-);
+app.use(cors(allowed ? { origin: allowed.split(",").map((s) => s.trim()) } : {}));
 
 // --- In-memory state --------------------------------------------------------
-const jobs = new Map(); // id -> job
-const logs = []; // newest last
+const jobs = new Map();
+const logs = [];
 const MAX_LOGS = 300;
 
 function log(level, message, meta = {}) {
-  const entry = {
-    id: crypto.randomUUID(),
-    ts: new Date().toISOString(),
-    level, // info | sent | error | warn
-    message,
-    ...meta,
-  };
+  const entry = { id: crypto.randomUUID(), ts: new Date().toISOString(), level, message, ...meta };
   logs.push(entry);
   if (logs.length > MAX_LOGS) logs.shift();
-  // Console copy WITHOUT credentials
   console.log(`[${entry.ts}] ${level.toUpperCase()} ${message}`);
   return entry;
 }
 
-// Shape a job for the client (strip secrets)
 function publicJob(j) {
   return {
-    id: j.id,
-    label: j.label,
-    recipients: j.recipients,
-    subject: j.subject,
-    type: j.type,
-    config: j.config,
-    fromMasked: maskEmail(j.user),
-    createdAt: j.createdAt,
-    lastRun: j.lastRun,
-    nextRun: j.nextRun,
-    runCount: j.runCount,
-    errorCount: j.errorCount,
-    status: j.status,
+    id: j.id, label: j.label, recipients: j.recipients, subject: j.subject,
+    type: j.type, config: j.config, from: j.from,
+    createdAt: j.createdAt, lastRun: j.lastRun, nextRun: j.nextRun,
+    runCount: j.runCount, errorCount: j.errorCount, status: j.status,
   };
 }
 
-function maskEmail(e = "") {
-  const [name, domain] = e.split("@");
-  if (!domain) return "***";
-  const head = name.slice(0, 2);
-  return `${head}${"*".repeat(Math.max(1, name.length - 2))}@${domain}`;
-}
-
-// --- Mail core --------------------------------------------------------------
-function makeTransport(user, pass) {
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: { user, pass: String(pass).replace(/\s+/g, "") }, // Google shows app pw with spaces
-  });
-}
-
+// --- Mail core (Resend HTTP API) -------------------------------------------
 async function deliver(job) {
-  const transporter = makeTransport(job.user, job.pass);
-  const info = await transporter.sendMail({
-    from: job.user,
-    to: job.recipients.join(", "),
-    subject: job.subject,
-    [job.html ? "html" : "text"]: job.body,
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${job.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: job.from,
+      to: job.recipients,
+      subject: job.subject,
+      [job.html ? "html" : "text"]: job.body,
+    }),
   });
+
+  let data = {};
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) throw new Error(friendlyError(res.status, data));
+
   job.lastRun = new Date().toISOString();
   job.runCount += 1;
   log("sent", `Dispatched "${job.subject}" to ${job.recipients.length} recipient(s)`, {
-    jobId: job.id,
-    messageId: info.messageId,
+    jobId: job.id, messageId: data.id,
   });
+  return data.id;
 }
 
 async function runJob(job) {
@@ -116,45 +91,25 @@ async function runJob(job) {
 // --- Scheduling -------------------------------------------------------------
 function arm(job) {
   if (job.type === "once") {
-    const fireAt = new Date(job.config.at).getTime();
-    const delay = Math.max(0, fireAt - Date.now());
+    const delay = Math.max(0, new Date(job.config.at).getTime() - Date.now());
     job.nextRun = new Date(Date.now() + delay).toISOString();
-    job._timer = setTimeout(async () => {
-      await runJob(job);
-      job.nextRun = null;
-      // keep completed jobs visible; they hold no active timer
-    }, delay);
+    job._timer = setTimeout(async () => { await runJob(job); job.nextRun = null; }, delay);
     return;
   }
-
   if (job.type === "interval") {
     const ms = job.config.everyMs;
     job.nextRun = new Date(Date.now() + ms).toISOString();
-    job._timer = setInterval(async () => {
-      await runJob(job);
-      job.nextRun = new Date(Date.now() + ms).toISOString();
-    }, ms);
+    job._timer = setInterval(async () => { await runJob(job); job.nextRun = new Date(Date.now() + ms).toISOString(); }, ms);
     return;
   }
-
-  // daily + cron both use node-cron expressions
-  const expr =
-    job.type === "daily"
-      ? dailyToCron(job.config.time)
-      : job.config.expr;
-
-  if (!cron.validate(expr)) {
-    throw new Error(`Invalid cron expression: ${expr}`);
-  }
+  const expr = job.type === "daily" ? dailyToCron(job.config.time) : job.config.expr;
+  if (!cron.validate(expr)) throw new Error(`Invalid cron expression: ${expr}`);
   job._task = cron.schedule(expr, () => runJob(job));
   job.config._cron = expr;
 }
 
 function disarm(job) {
-  if (job._timer) {
-    clearTimeout(job._timer);
-    clearInterval(job._timer);
-  }
+  if (job._timer) { clearTimeout(job._timer); clearInterval(job._timer); }
   if (job._task) job._task.stop();
 }
 
@@ -165,81 +120,56 @@ function dailyToCron(hhmm) {
 }
 
 // --- Routes -----------------------------------------------------------------
-app.get("/", (_req, res) =>
-  res.json({ service: "email-dispatch", ok: true, jobs: jobs.size })
-);
+app.get("/", (_req, res) => res.json({ service: "email-dispatch", provider: "resend", ok: true, jobs: jobs.size }));
+app.get("/health", (_req, res) => res.json({ ok: true, uptime: process.uptime(), jobs: jobs.size }));
 
-// Keep-alive target for an uptime pinger (see README)
-app.get("/health", (_req, res) =>
-  res.json({ ok: true, uptime: process.uptime(), jobs: jobs.size })
-);
-
-// Verify credentials + send one email immediately
 app.post("/test", async (req, res) => {
-  const { user, pass, recipients, subject, body, html } = req.body || {};
+  const { apiKey, from, recipients, subject, body, html } = req.body || {};
   const to = normalizeRecipients(recipients);
-  if (!user || !pass) return res.status(400).json({ error: "Missing sender email or app password." });
+  if (!apiKey) return res.status(400).json({ error: "Missing Resend API key." });
   if (!to.length) return res.status(400).json({ error: "Add at least one recipient." });
 
+  const job = {
+    apiKey, from: from || "onboarding@resend.dev",
+    recipients: to, subject: subject || "(no subject)", body: body || "", html: !!html,
+    id: "test", runCount: 0,
+  };
   try {
-    const transporter = makeTransport(user, pass);
-    await transporter.verify();
-    const info = await transporter.sendMail({
-      from: user,
-      to: to.join(", "),
-      subject: subject || "(no subject)",
-      [html ? "html" : "text"]: body || "",
-    });
-    log("sent", `Test send to ${to.length} recipient(s)`, { messageId: info.messageId });
-    res.json({ ok: true, messageId: info.messageId });
+    const id = await deliver(job);
+    res.json({ ok: true, messageId: id });
   } catch (err) {
-    log("error", `Test failed: ${err.message}`);
-    res.status(400).json({ error: friendlyError(err) });
+    res.status(400).json({ error: err.message });
   }
 });
 
-// Create a schedule
 app.post("/schedules", (req, res) => {
-  const { user, pass, recipients, subject, body, html, label, schedule } = req.body || {};
+  const { apiKey, from, recipients, subject, body, html, label, schedule } = req.body || {};
   const to = normalizeRecipients(recipients);
-
-  if (!user || !pass) return res.status(400).json({ error: "Missing sender email or app password." });
+  if (!apiKey) return res.status(400).json({ error: "Missing Resend API key." });
   if (!to.length) return res.status(400).json({ error: "Add at least one recipient." });
   if (!schedule || !schedule.type) return res.status(400).json({ error: "Pick a schedule." });
 
   const job = {
     id: crypto.randomUUID(),
     label: label || subject || "Untitled dispatch",
-    user,
-    pass,
+    apiKey,
+    from: from || "onboarding@resend.dev",
     recipients: to,
     subject: subject || "(no subject)",
     body: body || "",
     html: !!html,
-    type: schedule.type, // once | interval | daily | cron
+    type: schedule.type,
     config: schedule.config || {},
     createdAt: new Date().toISOString(),
-    lastRun: null,
-    nextRun: null,
-    runCount: 0,
-    errorCount: 0,
-    status: "active",
+    lastRun: null, nextRun: null, runCount: 0, errorCount: 0, status: "active",
   };
-
-  try {
-    arm(job);
-  } catch (err) {
-    return res.status(400).json({ error: err.message });
-  }
-
+  try { arm(job); } catch (err) { return res.status(400).json({ error: err.message }); }
   jobs.set(job.id, job);
   log("info", `Scheduled "${job.label}" (${job.type})`, { jobId: job.id });
   res.json({ ok: true, job: publicJob(job) });
 });
 
-app.get("/schedules", (_req, res) => {
-  res.json({ jobs: [...jobs.values()].map(publicJob) });
-});
+app.get("/schedules", (_req, res) => res.json({ jobs: [...jobs.values()].map(publicJob) }));
 
 app.delete("/schedules/:id", (req, res) => {
   const job = jobs.get(req.params.id);
@@ -250,9 +180,7 @@ app.delete("/schedules/:id", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/logs", (_req, res) => {
-  res.json({ logs: logs.slice(-150) });
-});
+app.get("/logs", (_req, res) => res.json({ logs: logs.slice(-150) }));
 
 // --- helpers ----------------------------------------------------------------
 function normalizeRecipients(input) {
@@ -263,13 +191,15 @@ function normalizeRecipients(input) {
     .filter((s) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s));
 }
 
-function friendlyError(err) {
-  const m = err.message || "Unknown error";
-  if (/Invalid login|Username and Password not accepted|BadCredentials/i.test(m))
-    return "Gmail rejected the login. Use a 16-character App Password (not your normal password), and make sure 2-Step Verification is on.";
-  if (/self signed|certificate/i.test(m)) return "TLS/certificate problem reaching Gmail.";
+function friendlyError(status, data) {
+  const m = (data && (data.message || data.error || data.name)) || `Resend HTTP ${status}`;
+  if (status === 401) return "Resend rejected the API key — check it starts with 're_' and is still active.";
+  if (status === 429) return "Rate limited by Resend (free tier is 2 req/sec, 100/day). Try again shortly.";
+  if (status === 403 || /verif|own email|testing emails|domain/i.test(m)) {
+    return m + " — On the free tier without a verified domain you can only send from onboarding@resend.dev to your own Resend account email. Verify a domain in the Resend dashboard to send anywhere.";
+  }
   return m;
 }
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => log("info", `Relay listening on :${PORT}`));
+app.listen(PORT, () => log("info", `Relay (Resend) listening on :${PORT}`));
