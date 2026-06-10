@@ -20,17 +20,6 @@ If you skip Firebase, the relay still runs — it just keeps everything in memor
 
 ---
 
-## About "make Firebase a GitHub secret"
-
-Two separate things get conflated here:
-
-- **The Firebase *web* config** (the `apiKey`/`authDomain`/… block from the console) is **not a secret**. Google designs it to be public; security comes from Firestore rules, not from hiding it. And a GitHub Actions secret can't hide it on a static site anyway — whatever you inject ends up in the served HTML. In this build the **browser doesn't use Firebase at all**, so that config isn't needed in `index.html`.
-- **The Firebase *service account*** (a private-key JSON) **is** the real secret. It belongs to the relay, which runs on **Render** — so it goes in a **Render environment variable**, not a GitHub secret. (GitHub secrets only apply to GitHub Actions builds; they wouldn't reach your Render service.)
-
-So: nothing sensitive goes into the GitHub repo, and the one true secret lives in Render's env vars.
-
----
-
 ## 1. Resend
 
 1. Sign up at resend.com, create an API key (`re_…`).
