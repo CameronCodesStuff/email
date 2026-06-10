@@ -186,17 +186,17 @@
         <textarea id="recipients" placeholder="alice@example.com, bob@example.com&#10;newline or comma separated"></textarea>
       </label>
 
-      <div class="row">
-        <label class="fld">
-          <span>Sender (Gmail)</span>
-          <input id="sender" placeholder="you@gmail.com" autocomplete="username" />
-        </label>
-        <label class="fld">
-          <span>App password</span>
-          <input id="apppass" type="password" placeholder="16-char app password" autocomplete="off" />
-        </label>
-      </div>
-      <label class="check"><input type="checkbox" id="rememberPass" /> Remember app password on this device</label>
+      <label class="fld">
+        <span>From address</span>
+        <input id="from" placeholder="onboarding@resend.dev" value="onboarding@resend.dev" autocomplete="off" />
+        <div class="hint">Until you verify a domain in Resend, leave this as onboarding@resend.dev — in that state it can only send to your own Resend account email.</div>
+      </label>
+
+      <label class="fld">
+        <span>Resend API key</span>
+        <input id="apikey" type="password" placeholder="re_xxxxxxxxxxxx" autocomplete="off" />
+      </label>
+      <label class="check"><input type="checkbox" id="rememberKey" /> Remember API key on this device</label>
 
       <label class="fld">
         <span>Subject</span>
@@ -266,8 +266,8 @@
 
   // restore saved fields
   $("#endpoint").value = endpoint;
-  $("#sender").value = LS.getItem("dispatch.sender") || "";
-  if (LS.getItem("dispatch.pass")) { $("#apppass").value = LS.getItem("dispatch.pass"); $("#rememberPass").checked = true; }
+  const savedFrom = LS.getItem("dispatch.from"); if (savedFrom) $("#from").value = savedFrom;
+  if (LS.getItem("dispatch.apikey")) { $("#apikey").value = LS.getItem("dispatch.apikey"); $("#rememberKey").checked = true; }
 
   // ---- toast ----
   let toastT;
@@ -372,13 +372,13 @@
 
   // ---- gather compose payload ----
   function payload(){
-    const sender = $("#sender").value.trim();
-    const pass = $("#apppass").value;
-    LS.setItem("dispatch.sender", sender);
-    if ($("#rememberPass").checked) LS.setItem("dispatch.pass", pass); else LS.removeItem("dispatch.pass");
+    const from = $("#from").value.trim() || "onboarding@resend.dev";
+    const apiKey = $("#apikey").value.trim();
+    LS.setItem("dispatch.from", from);
+    if ($("#rememberKey").checked) LS.setItem("dispatch.apikey", apiKey); else LS.removeItem("dispatch.apikey");
     return {
-      user: sender,
-      pass,
+      apiKey,
+      from,
       recipients: $("#recipients").value,
       subject: $("#subject").value,
       body: $("#bodytext").value,
