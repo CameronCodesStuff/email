@@ -194,9 +194,12 @@
 
       <label class="fld">
         <span>Resend API key</span>
-        <input id="apikey" type="password" placeholder="re_xxxxxxxxxxxx" autocomplete="off" />
+        <input id="apikey" type="password" placeholder="re_… (saved on the relay)" autocomplete="off" />
       </label>
-      <label class="check"><input type="checkbox" id="rememberKey" /> Remember API key on this device</label>
+      <div class="actions" style="margin-top:0;margin-bottom:8px">
+        <button class="go ghost" id="saveCfg">Save credentials to relay</button>
+      </div>
+      <div class="hint" id="cfgStatus" style="margin-bottom:16px">credentials: connect to the relay to check</div>
 
       <label class="fld">
         <span>Subject</span>
@@ -267,7 +270,6 @@
   // restore saved fields
   $("#endpoint").value = endpoint;
   const savedFrom = LS.getItem("dispatch.from"); if (savedFrom) $("#from").value = savedFrom;
-  if (LS.getItem("dispatch.apikey")) { $("#apikey").value = LS.getItem("dispatch.apikey"); $("#rememberKey").checked = true; }
 
   // ---- toast ----
   let toastT;
@@ -308,6 +310,7 @@
       await api("/health");
       setConn("live");
       toast("Relay online.", "ok");
+      loadCfg();
       refresh();
     } catch(e){
       setConn("down");
@@ -315,6 +318,29 @@
     }
   }
   $("#connectBtn").addEventListener("click", connect);
+
+  // ---- relay-stored credentials ----
+  function showCfg(c){
+    const el = $("#cfgStatus");
+    if (c && c.hasKey){
+      el.innerHTML = `credentials: <span style="color:var(--green)">key on relay</span> <span style="color:var(--muted-dim)">(${esc(c.keyMasked||"")})</span> &middot; from ${esc(c.from||"")} &middot; ${esc(c.persistence||"")}`;
+      if (c.from) $("#from").value = c.from;
+    } else if (c){
+      el.innerHTML = `credentials: <span style="color:var(--amber)">no key stored</span> &middot; ${esc(c.persistence||"")} &mdash; enter your re_ key and save`;
+    }
+  }
+  async function loadCfg(){ try { showCfg(await api("/config")); } catch(_){} }
+  $("#saveCfg").addEventListener("click", ()=> busy($("#saveCfg"), async ()=>{
+    try {
+      const r = await api("/config", { method:"POST", body: JSON.stringify({
+        resendApiKey: $("#apikey").value.trim(),
+        from: $("#from").value.trim()
+      })});
+      $("#apikey").value = ""; // it lives on the relay now
+      showCfg(r);
+      toast("Credentials saved to relay \u2713", "ok");
+    } catch(e){ toast(e.message, "err"); }
+  }));
 
   // ---- schedule config UI ----
   function renderCfg(){
@@ -326,11 +352,20 @@
       c.innerHTML = `<div class="interval">
         <label class="fld"><span>Every</span><input type="number" id="intN" min="1" value="30"></label>
         <label class="fld"><span>Unit</span><select id="intU">
-          <option value="60000">minutes</option>
+          <option value="1000">seconds</option>
+          <option value="60000" selected>minutes</option>
           <option value="3600000">hours</option>
           <option value="86400000">days</option>
         </select></label>
-      </div><div class="hint">Repeats forever until cancelled. Counts from when you schedule it.</div>`;
+      </div><div class="hint" id="rateWarn"></div>`;
+      const upd = ()=>{
+        const n = parseInt($("#intN").value,10)||0, u = parseInt($("#intU").value,10);
+        const perDay = (n>0 && u>0) ? Math.floor(86400000/(n*u)) : 0;
+        const w = $("#rateWarn");
+        if (perDay>100){ w.style.color="var(--amber)"; w.textContent = `\u2248 ${perDay} sends/day \u2014 over Resend free tier's 100/day cap; sends fail once you hit it.`; }
+        else { w.style.color=""; w.textContent = `\u2248 ${perDay} send${perDay===1?"":"s"}/day \u00b7 repeats until cancelled.`; }
+      };
+      $("#intN").addEventListener("input", upd); $("#intU").addEventListener("change", upd); upd();
     } else if (schedType==="daily"){
       c.innerHTML = `<label class="fld"><span>Time each day (relay's clock — UTC on Render)</span><input type="time" id="dailyT" value="09:00"></label>`;
     } else {
@@ -358,7 +393,7 @@
       const u = parseInt($("#intU").value,10);
       if(!n || n<1) throw new Error("Interval must be at least 1.");
       const ms = n*u;
-      const unit = u===60000?"minute":u===3600000?"hour":"day";
+      const unit = u===1000?"second":u===60000?"minute":u===3600000?"hour":"day";
       return { type:"interval", config:{ everyMs:ms, human:`every ${n} ${unit}${n>1?"s":""}` } };
     }
     if (schedType==="daily"){
@@ -373,11 +408,8 @@
   // ---- gather compose payload ----
   function payload(){
     const from = $("#from").value.trim() || "onboarding@resend.dev";
-    const apiKey = $("#apikey").value.trim();
     LS.setItem("dispatch.from", from);
-    if ($("#rememberKey").checked) LS.setItem("dispatch.apikey", apiKey); else LS.removeItem("dispatch.apikey");
-    return {
-      apiKey,
+    const p = {
       from,
       recipients: $("#recipients").value,
       subject: $("#subject").value,
@@ -385,6 +417,9 @@
       html: $("#ishtml").checked,
       label: $("#subject").value
     };
+    const k = $("#apikey").value.trim();
+    if (k) p.apiKey = k; // only sent if you typed one; otherwise the relay uses its stored key
+    return p;
   }
 
   // ---- actions ----
