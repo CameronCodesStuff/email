@@ -1,65 +1,76 @@
-# DISPATCH — email relay (Resend)
+# DISPATCH — email relay (Resend + Firestore)
 
-Two pieces:
+- **`index.html`** → static UI on **GitHub Pages**. Talks only to your relay.
+- **`server.js` + `package.json`** → the relay, a **Render Web Service**. Sends via the **Resend HTTP API** and runs schedules.
+- **`firestore.rules`** → lock-down rules for your Firebase project.
 
-- **`index.html`** → static UI, hosted on **GitHub Pages**.
-- **`server.js` + `package.json`** → the relay, hosted as a **Render Web Service**. It sends mail through the **Resend HTTP API** and runs the schedules.
-
-Resend is used instead of Gmail/SMTP because Render (like most cloud hosts) blocks outbound SMTP ports. Resend sends over HTTPS (port 443), which isn't blocked.
-
----
-
-## 1. Get a Resend API key
-
-1. Sign up at **resend.com** (free).
-2. **API Keys → Create API Key.** Copy it — it starts with `re_`.
-3. That's the only credential the app needs. You paste it into the page.
-
-### The free-tier sending rule (read this)
-- Free tier: **100 emails/day, 3,000/month**, rate-limited to 2 requests/sec.
-- **Until you verify a domain**, you can only send **from `onboarding@resend.dev`**, and only **to your own Resend account email** (the address you signed up with). Great for testing; it won't reach other people yet.
-- To send to anyone, go to **Resend → Domains → Add Domain**, add the DNS records it gives you (SPF/DKIM), and once verified set the **From address** on the page to something `@yourdomain.com`.
+Only the relay touches Firebase, using a service account. The browser never sees Firebase or your Resend key.
 
 ---
 
-## 2. Deploy the relay to Render
+## What gets stored where
 
-1. Put `server.js` and `package.json` at the **root** of a GitHub repo.
-2. **render.com → New + → Web Service**, connect that repo.
-3. Settings:
-   - **Runtime:** Node (auto-detected)
-   - **Build Command:** `npm install`
-   - **Start Command:** `npm start`
-   - **Instance Type:** Free
-4. *(Recommended)* Environment Variables → add **`ALLOWED_ORIGIN`** = your Pages URL, e.g. `https://cameroncodesstuff.github.io` so only your page can use the relay.
-5. Deploy. Copy the URL, e.g. `https://email-xxxx.onrender.com`.
+| Thing | Where | Why |
+|---|---|---|
+| Relay endpoint URL | your browser (localStorage) | the browser needs it to find the relay — can't live server-side |
+| Resend API key | Firestore, written/read by the relay only | secret; never sent back to the browser (shown masked) |
+| Schedules | Firestore | survive Render restarts / spin-downs; re-armed on boot |
 
-### Free-tier scheduler caveat
-Render's free web service **sleeps after 15 min idle** and **loses in-memory state on restart** — so armed schedules disappear and won't fire while asleep. Options:
-- **Keep it warm:** point a free uptime pinger (cron-job.org, UptimeRobot) at `/health` every ~10 min.
-- **Pay (~$7/mo):** always-on, but schedules still reset on redeploy unless you add a database.
-- **For real durability:** persist schedules to a DB and re-arm on boot (this build keeps them in memory by design).
+If you skip Firebase, the relay still runs — it just keeps everything in memory and loses it on restart.
 
 ---
 
-## 3. Deploy the page to GitHub Pages
+## About "make Firebase a GitHub secret"
 
-1. Put `index.html` in a repo (can be the same one).
-2. **Settings → Pages →** deploy from branch, `main` / root.
-3. Open the published URL, paste your Render URL into **Relay endpoint**, hit **Connect** (first wake can take ~60s).
+Two separate things get conflated here:
+
+- **The Firebase *web* config** (the `apiKey`/`authDomain`/… block from the console) is **not a secret**. Google designs it to be public; security comes from Firestore rules, not from hiding it. And a GitHub Actions secret can't hide it on a static site anyway — whatever you inject ends up in the served HTML. In this build the **browser doesn't use Firebase at all**, so that config isn't needed in `index.html`.
+- **The Firebase *service account*** (a private-key JSON) **is** the real secret. It belongs to the relay, which runs on **Render** — so it goes in a **Render environment variable**, not a GitHub secret. (GitHub secrets only apply to GitHub Actions builds; they wouldn't reach your Render service.)
+
+So: nothing sensitive goes into the GitHub repo, and the one true secret lives in Render's env vars.
+
+---
+
+## 1. Resend
+
+1. Sign up at resend.com, create an API key (`re_…`).
+2. Free tier: **100/day, 3,000/month**, 2 req/sec. Until you verify a domain you can only send **from `onboarding@resend.dev`** **to your own Resend account email**. Add a domain (Resend → Domains, set the DNS records) to send anywhere.
+
+You'll paste the key into the page once and hit **Save credentials to relay** — it's stored in Firestore from then on.
+
+## 2. Firebase
+
+1. In the Firebase console for your project (`email-71b87`), enable **Firestore Database**.
+2. **Project settings → Service accounts → Generate new private key.** Downloads a JSON file.
+3. Open `firestore.rules` from this repo and paste it into **Firestore → Rules → Publish** (denies all client access — the relay's service account bypasses rules).
+
+## 3. Deploy the relay (Render)
+
+1. Put `server.js` + `package.json` at a repo root; connect it as a **Web Service** on Render.
+   - Build: `npm install` · Start: `npm start` · Instance: Free (or paid for always-on).
+2. **Environment Variables:**
+   - `FIREBASE_SERVICE_ACCOUNT` = the entire contents of the service-account JSON (paste the whole `{ … }` as one value).
+   - *(optional)* `RESEND_API_KEY` = your `re_…` key, if you'd rather set it here than in the UI.
+   - *(recommended)* `ALLOWED_ORIGIN` = your Pages URL, e.g. `https://cameroncodesstuff.github.io`.
+3. Deploy. Logs should show `Firestore persistence enabled.` If you see `running in-memory`, the service-account var is missing or malformed.
+
+## 4. Deploy the page (GitHub Pages)
+
+Put `index.html` in a repo, enable Pages (deploy from branch, root), open it, paste the Render URL into **Relay endpoint**, **Connect**.
 
 ---
 
 ## Using it
 
-- **From address** — `onboarding@resend.dev` until you verify a domain.
-- **Resend API key** — your `re_...` key.
-- **Send test now** — fires one email immediately so you can confirm it works.
-- **Schedule dispatch** — Once / Every-N / Daily / Cron. Daily and Cron run on the relay's clock = **UTC** on Render.
-- **Dispatch log** streams sends/failures live; **Active schedules** lists what's armed (cancel anytime).
+- **Save credentials to relay** stores your Resend key + From address server-side. The status line shows `key on relay (re_ab…wxyz)` once set.
+- **Schedule types:** Once / Every-N / Daily / Cron.
+  - **Every-N** now supports **seconds**, minutes, hours, days. It shows an estimated **sends/day** and warns when you'd blow past Resend's 100/day cap. The relay floors intervals at 1 second.
+  - **Daily / Cron** run on the relay's clock = **UTC** on Render.
+- Schedules persist: redeploy or let Render sleep, and they reload from Firestore on the next boot.
 
 ## Security notes
 
-- The API key is sent to *your* relay and held in memory for active schedules only — never logged, never returned to the page.
-- "Remember API key on this device" stores it in your browser's localStorage (plaintext on that machine). Leave it off on shared computers.
+- The Resend key and service account never leave the server and are never logged.
+- The relay only returns a **masked** key (`re_ab…wxyz`).
+- Keep `firestore.rules` set to deny-all; all legitimate access is via the relay's Admin SDK.
 - Set `ALLOWED_ORIGIN` so only your page can reach the relay.
